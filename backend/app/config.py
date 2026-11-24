@@ -5,7 +5,7 @@ from dataclasses import dataclass
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:////tmp/nexora.db")
     llm_api_keys: list[str] = None
-    model: str = os.getenv("LLM_MODEL", "gemini/gemini-2.0-flash")
+    model: str = os.getenv("LLM_MODEL", "gemini/gemini-3.8-flash")
     allowed_origins: list[str] = None
     enable_failure_simulation: bool = os.getenv("ENABLE_FAILURE_SIMULATION", "false").lower() == "true"
     default_system_prompt: str = os.getenv("DEFAULT_SYSTEM_PROMPT", "You are Nexora AI, a helpful and accurate assistant.")
