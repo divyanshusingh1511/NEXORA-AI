@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Settings:
-    database_url: str = os.getenv("DATABASE_URL", "sqlite:////tmp/nexora.db")
+    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./nexora.db")
     llm_api_keys: list[str] = None
     model: str = os.getenv("LLM_MODEL", "gemini/gemini-3.8-flash")
     allowed_origins: list[str] = None

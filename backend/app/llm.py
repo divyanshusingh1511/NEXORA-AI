@@ -12,6 +12,20 @@ from .config import settings
 
 
 # --------------------------------------------------
+# Model configuration
+# --------------------------------------------------
+
+PRIMARY_MODEL = settings.model
+BACKUP_MODEL = "gemini/gemini-3.5-flash-lite"
+
+# Primary model is always attempted before backup.
+MODELS = [
+    PRIMARY_MODEL,
+    BACKUP_MODEL,
+]
+
+
+# --------------------------------------------------
 # Logging configuration
 # --------------------------------------------------
 
@@ -59,7 +73,7 @@ class Result:
 def _cache_key(messages):
     raw = json.dumps(
         {
-            "model": settings.model,
+            "models": MODELS,
             "messages": messages
         },
         sort_keys=True,
@@ -92,7 +106,6 @@ def _usage(response):
 def _safe_error_message(exc, api_keys):
     message = str(exc)
 
-    # Never print API keys in Render logs
     for api_key in api_keys:
         if api_key:
             message = message.replace(
@@ -147,9 +160,7 @@ def ask(messages, failure_header=None):
 
         cached = _RESPONSE_CACHE[cache_key]
 
-        logger.info(
-            "LLM cache hit"
-        )
+        logger.info("LLM cache hit")
 
         return Result(
             cached["reply"],
@@ -172,18 +183,16 @@ def ask(messages, failure_header=None):
     # ----------------------------------------------
 
     if not api_keys:
-
-        logger.error(
-            "No LLM API keys configured."
-        )
+        logger.error("No LLM API keys configured.")
 
         raise ProvidersUnavailable(
             "No LLM API keys configured."
         )
 
     logger.info(
-        "Starting inference | model=%s | configured_keys=%s",
-        settings.model,
+        "Starting inference | primary=%s | backup=%s | configured_keys=%s",
+        PRIMARY_MODEL,
+        BACKUP_MODEL,
         len(api_keys)
     )
 
@@ -200,178 +209,199 @@ def ask(messages, failure_header=None):
     errors = []
 
     # ----------------------------------------------
-    # Try each configured provider key
+    # Try primary model, then backup model
     # ----------------------------------------------
 
-    for index, api_key in enumerate(
-        api_keys,
-        start=1
-    ):
+    for model_index, model in enumerate(MODELS):
 
-        key_id = f"key_{index}"
+        is_fallback = model_index > 0
 
-        # Skip empty keys
-        if not api_key or not api_key.strip():
-
-            failures += 1
-
-            logger.error(
-                "Skipping %s: API key is empty.",
-                key_id
-            )
-
-            continue
-
-        # Failure simulation
-        if "*" in simulated or key_id in simulated:
-
-            simulated_status = simulated.get(
-                key_id,
-                simulated.get("*")
-            )
-
-            failures += 1
-
+        if is_fallback:
             logger.warning(
-                "Failure simulation triggered | key=%s | status=%s",
-                key_id,
-                simulated_status
+                "PRIMARY MODEL FAILED | switching to backup=%s",
+                model
             )
-
-            continue
 
         # ------------------------------------------
-        # Call Gemini through LiteLLM
+        # Try every configured API key for this model
         # ------------------------------------------
 
-        try:
+        for index, api_key in enumerate(api_keys, start=1):
 
-            logger.info(
-                "Attempting inference | key=%s | model=%s",
-                key_id,
-                settings.model
-            )
+            key_id = f"key_{index}"
 
-            response = completion(
-                model=settings.model,
-                messages=messages,
-                api_key=api_key,
-                caching=True,
-                timeout=45,
-            )
+            if not api_key or not api_key.strip():
 
-            # --------------------------------------
-            # Extract response
-            # --------------------------------------
+                failures += 1
 
-            content = response.choices[0].message.content
-
-            if not content:
-
-                content = (
-                    "I couldn't generate a response. "
-                    "Please try again."
+                logger.error(
+                    "Skipping %s: API key is empty.",
+                    key_id
                 )
 
+                continue
+
             # --------------------------------------
-            # Extract token usage
+            # Failure simulation
             # --------------------------------------
 
-            input_tokens, output_tokens = _usage(
-                response
-            )
+            if "*" in simulated or key_id in simulated:
 
-            latency = max(
-                0,
-                int(
-                    (time.perf_counter() - started) * 1000
+                simulated_status = simulated.get(
+                    key_id,
+                    simulated.get("*")
                 )
-            )
 
-            metadata = {
-                "resolution_source": "LIVE_INFERENCE",
-                "model": settings.model,
-                "latency_ms": latency,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "key_id": key_id,
-                "fallback_attempts": failures,
-            }
+                failures += 1
+
+                logger.warning(
+                    "Failure simulation triggered | model=%s | key=%s | status=%s",
+                    model,
+                    key_id,
+                    simulated_status
+                )
+
+                continue
 
             # --------------------------------------
-            # Save successful response in cache
+            # Call Gemini through LiteLLM
             # --------------------------------------
 
-            _RESPONSE_CACHE[cache_key] = {
-                "reply": content,
-                "metadata": metadata
-            }
+            try:
 
-            logger.info(
-                "Inference successful | key=%s | latency_ms=%s",
-                key_id,
-                latency
-            )
+                logger.info(
+                    "Attempting inference | model=%s | key=%s",
+                    model,
+                    key_id
+                )
 
-            return Result(
-                content,
-                metadata
-            )
+                response = completion(
+                    model=model,
+                    messages=messages,
+                    api_key=api_key,
+                    caching=True,
+                    timeout=45,
+                )
 
-        # ------------------------------------------
-        # Capture actual provider errors
-        # ------------------------------------------
+                # ----------------------------------
+                # Extract response
+                # ----------------------------------
 
-        except Exception as exc:
+                content = response.choices[0].message.content
 
-            status = getattr(
-                exc,
-                "status_code",
-                None
-            )
+                if not content:
+                    content = (
+                        "I couldn't generate a response. "
+                        "Please try again."
+                    )
 
-            error_type = type(exc).__name__
+                # ----------------------------------
+                # Extract token usage
+                # ----------------------------------
 
-            error_message = _safe_error_message(
-                exc,
-                api_keys
-            )
+                input_tokens, output_tokens = _usage(
+                    response
+                )
 
-            errors.append(
-                {
+                latency = max(
+                    0,
+                    int(
+                        (time.perf_counter() - started) * 1000
+                    )
+                )
+
+                metadata = {
+                    "resolution_source": (
+                        "MODEL_FALLBACK"
+                        if is_fallback
+                        else "LIVE_INFERENCE"
+                    ),
+                    "model": model,
+                    "latency_ms": latency,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
                     "key_id": key_id,
-                    "type": error_type,
-                    "status": status,
-                    "message": error_message
+                    "fallback_attempts": failures,
                 }
-            )
 
-            logger.error(
-                "PROVIDER FAILURE | key=%s | model=%s | "
-                "type=%s | status=%s | message=%s",
-                key_id,
-                settings.model,
-                error_type,
-                status,
-                error_message
-            )
+                # ----------------------------------
+                # Save successful response in cache
+                # ----------------------------------
 
-            failures += 1
+                _RESPONSE_CACHE[cache_key] = {
+                    "reply": content,
+                    "metadata": metadata
+                }
 
-            # Try the next configured API key
-            continue
+                logger.info(
+                    "Inference successful | model=%s | key=%s | fallback=%s | latency_ms=%s",
+                    model,
+                    key_id,
+                    is_fallback,
+                    latency
+                )
+
+                return Result(
+                    content,
+                    metadata
+                )
+
+            # --------------------------------------
+            # Capture provider errors
+            # --------------------------------------
+
+            except Exception as exc:
+
+                status = getattr(
+                    exc,
+                    "status_code",
+                    None
+                )
+
+                error_type = type(exc).__name__
+
+                error_message = _safe_error_message(
+                    exc,
+                    api_keys
+                )
+
+                errors.append(
+                    {
+                        "model": model,
+                        "key_id": key_id,
+                        "type": error_type,
+                        "status": status,
+                        "message": error_message
+                    }
+                )
+
+                logger.error(
+                    "PROVIDER FAILURE | model=%s | key=%s | "
+                    "type=%s | status=%s | message=%s",
+                    model,
+                    key_id,
+                    error_type,
+                    status,
+                    error_message
+                )
+
+                failures += 1
+
+                # Continue to the next API key.
+                continue
 
     # ----------------------------------------------
-    # All providers failed
+    # All models and keys failed
     # ----------------------------------------------
 
     logger.error(
-        "ALL PROVIDERS UNAVAILABLE | attempted=%s | failures=%s",
-        len(api_keys),
+        "ALL MODELS UNAVAILABLE | models=%s | attempted=%s | failures=%s",
+        len(MODELS),
+        len(MODELS) * len(api_keys),
         failures
     )
 
     raise ProvidersUnavailable(
-        "All providers unavailable. "
+        "All configured Gemini models are unavailable. "
         f"Failed attempts: {failures}"
     )
